@@ -332,18 +332,18 @@ impl Node {
         log: &[LogEntry],
         from: NodeId,
         mut votes_received: HashSet<NodeId>,
-        response_term: u64,
+        sender_term: u64,
         success: bool,
     ) -> (Vec<(NodeId, RaftMessage)>, NodeState) {
         let majority = 1 + (peers.len() + 1) / 2;
 
-        if *current_term < response_term {
+        if *current_term < sender_term {
             let state = NodeState::Follower {
                 current_leader: None,
                 voted_for: None,
             };
 
-            *current_term = response_term;
+            *current_term = sender_term;
 
             return (vec![], state);
         }
@@ -508,7 +508,7 @@ mod tests {
         NodeId::from_uuid(Uuid::new_v4())
     }
 
-    fn make_envelope(from: NodeId, to: NodeId) -> Envelope {
+    fn create_request_vote_envelope(from: NodeId, to: NodeId) -> Envelope {
         Envelope {
             from: from.clone(),
             to: to.clone(),
@@ -521,19 +521,37 @@ mod tests {
         }
     }
 
+    fn create_request_vote_response_envelope(
+        from: NodeId,
+        to: NodeId,
+        term: u64,
+        success: bool,
+    ) -> Envelope {
+        Envelope {
+            from: from.clone(),
+            to: to.clone(),
+            message: RaftMessage::RequestVoteResponse { term, success },
+        }
+    }
+
     #[test]
     fn follower_grants_vote_when_all_conditions_met() {
         let mut node = Node::new();
         let candidate_id = make_node_id();
 
-        let envelope = make_envelope(candidate_id.clone(), node.node_id.clone());
+        let envelope = create_request_vote_envelope(candidate_id.clone(), node.node_id.clone());
 
-        let result = node.handle_message(envelope).expect("handle_message failed");
+        let result = node
+            .handle_message(envelope)
+            .expect("handle_message failed");
 
         assert_eq!(result.len(), 1);
         let (to, msg) = &result[0];
         assert_eq!(to, &candidate_id);
-        assert!(matches!(msg, RaftMessage::RequestVoteResponse { success: true, .. }));
+        assert!(matches!(
+            msg,
+            RaftMessage::RequestVoteResponse { success: true, .. }
+        ));
     }
 
     #[test]
@@ -542,14 +560,19 @@ mod tests {
         let candidate_id = make_node_id();
         node.current_term = 2;
 
-        let envelope = make_envelope(candidate_id.clone(), node.node_id.clone());
+        let envelope = create_request_vote_envelope(candidate_id.clone(), node.node_id.clone());
 
-        let result = node.handle_message(envelope).expect("handle_message failed");
+        let result = node
+            .handle_message(envelope)
+            .expect("handle_message failed");
 
         assert_eq!(result.len(), 1);
         let (to, msg) = &result[0];
         assert_eq!(to, &candidate_id);
-        assert!(matches!(msg, RaftMessage::RequestVoteResponse { success: false, .. }));
+        assert!(matches!(
+            msg,
+            RaftMessage::RequestVoteResponse { success: false, .. }
+        ));
     }
 
     #[test]
@@ -562,14 +585,19 @@ mod tests {
             voted_for: Some(make_node_id()),
         };
 
-        let envelope = make_envelope(candidate_id.clone(), node.node_id.clone());
+        let envelope = create_request_vote_envelope(candidate_id.clone(), node.node_id.clone());
 
-        let result = node.handle_message(envelope).expect("handle_message failed");
+        let result = node
+            .handle_message(envelope)
+            .expect("handle_message failed");
 
         assert_eq!(result.len(), 1);
         let (to, msg) = &result[0];
         assert_eq!(to, &candidate_id);
-        assert!(matches!(msg, RaftMessage::RequestVoteResponse { success: false, .. }));
+        assert!(matches!(
+            msg,
+            RaftMessage::RequestVoteResponse { success: false, .. }
+        ));
     }
 
     #[test]
@@ -580,16 +608,166 @@ mod tests {
         node.log.push(LogEntry {
             term: 0,
             index: 0,
-            command: Command::Set { key: "".to_string(), value: "".to_string() },
+            command: Command::Set {
+                key: "".to_string(),
+                value: "".to_string(),
+            },
         });
 
-        let envelope = make_envelope(candidate_id.clone(), node.node_id.clone());
+        let envelope = create_request_vote_envelope(candidate_id.clone(), node.node_id.clone());
 
-        let result = node.handle_message(envelope).expect("handle_message failed");
+        let result = node
+            .handle_message(envelope)
+            .expect("handle_message failed");
 
         assert_eq!(result.len(), 1);
         let (to, msg) = &result[0];
         assert_eq!(to, &candidate_id);
-        assert!(matches!(msg, RaftMessage::RequestVoteResponse { success: false, .. }));
+        assert!(matches!(
+            msg,
+            RaftMessage::RequestVoteResponse { success: false, .. }
+        ));
+    }
+
+    #[test]
+    fn candidate_becomes_follower_if_behind() {
+        let mut candidate_node = Node::new();
+        let vote_response_node = make_node_id();
+
+        candidate_node.state = NodeState::Candidate {
+            votes_received: Default::default(),
+        };
+
+        candidate_node.current_term = 1;
+
+        let envelope = create_request_vote_response_envelope(
+            vote_response_node.clone(),
+            candidate_node.node_id.clone(),
+            2,
+            false,
+        );
+
+        let result = candidate_node
+            .handle_message(envelope)
+            .expect("handle_message failed");
+
+        assert_eq!(result.len(), 0);
+        // Candidate becomes a Follower due to its Vote Request responder having a higher term than it does
+        assert!(matches!(
+            candidate_node.state,
+            NodeState::Follower {
+                current_leader: None,
+                voted_for: None
+            }
+        ));
+    }
+
+    #[test]
+    fn candidate_stays_candidate_if_terms_equal_votes_unchanged() {
+        let mut candidate_node = Node::new();
+        let vote_response_node = make_node_id();
+
+        candidate_node.state = NodeState::Candidate {
+            votes_received: Default::default(),
+        };
+
+        candidate_node.current_term = 1;
+
+        let envelope = create_request_vote_response_envelope(
+            vote_response_node.clone(),
+            candidate_node.node_id.clone(),
+            1,
+            false,
+        );
+
+        let result = candidate_node
+            .handle_message(envelope)
+            .expect("handle_message failed");
+
+        assert_eq!(result.len(), 0);
+        // Candidate becomes a Follower due to its Vote Request responder having a higher term than it does
+        assert!(matches!(candidate_node.state, NodeState::Candidate { .. }));
+        if let NodeState::Candidate { votes_received } = &candidate_node.state {
+            assert!(votes_received.is_empty());
+        } else {
+            panic!("expected Candidate state");
+        }
+    }
+
+    #[test]
+    fn candidate_becomes_leader_once_majority_votes() {
+        let mut candidate_node = Node::new();
+        let node_1 = make_node_id();
+        let node_2 = make_node_id();
+        let node_3 = make_node_id();
+
+        let mut peers = Vec::new();
+        peers.push(node_1.clone());
+        peers.push(node_2.clone());
+        peers.push(node_3.clone());
+
+        candidate_node.state = NodeState::Candidate {
+            votes_received: Default::default(),
+        };
+
+        candidate_node.log.push(LogEntry {
+            term: 0,
+            index: 0,
+            command: Command::Delete {
+                key: "".to_string(),
+            },
+        });
+
+        // 4 node cluster, the candidate votes for itself so needs two more votes to obtain majority
+        candidate_node.peers.push(node_1.clone());
+        candidate_node.peers.push(node_2.clone());
+        candidate_node.peers.push(node_3.clone());
+
+        // Candidate will be a higher term that its peers
+        candidate_node.current_term = 2;
+
+        let envelope_1 = create_request_vote_response_envelope(
+            node_1.clone(),
+            candidate_node.node_id.clone(),
+            1,
+            true,
+        );
+
+        candidate_node
+            .handle_message(envelope_1)
+            .expect("handle_message failed");
+
+        assert!(matches!(candidate_node.state, NodeState::Candidate { .. }));
+
+        let envelope_2 = create_request_vote_response_envelope(
+            node_2.clone(),
+            candidate_node.node_id.clone(),
+            1,
+            true,
+        );
+
+        candidate_node
+            .handle_message(envelope_2)
+            .expect("handle_message failed");
+
+        let mut next_index = HashMap::new();
+        let mut match_index = HashMap::new();
+        for peer in peers.iter() {
+            next_index.insert(peer.clone(), candidate_node.log.len());
+            match_index.insert(peer.clone(), 0);
+        }
+
+        assert!(matches!(
+            candidate_node.state,
+            NodeState::Leader {
+                next_log_index: _next_index,
+                confirmed_log_index: _match_index
+            }
+        ));
+    }
+
+    #[test]
+    fn handle_append_entries_sender_term_is_behind_node_term_reject() {
+
     }
 }
