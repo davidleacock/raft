@@ -503,6 +503,7 @@ impl Node {
 mod tests {
     use super::*;
     use uuid::Uuid;
+    use crate::log_entry::Command::Delete;
 
     fn make_node_id() -> NodeId {
         NodeId::from_uuid(Uuid::new_v4())
@@ -531,6 +532,30 @@ mod tests {
             from: from.clone(),
             to: to.clone(),
             message: RaftMessage::RequestVoteResponse { term, success },
+        }
+    }
+
+    fn create_append_entries_request_envelope(
+        from: NodeId,
+        to: NodeId,
+        leader_id: NodeId,
+        term: u64,
+        prev_log_term: u64,
+        leader_commit: usize,
+        prev_log_index: usize,
+        entries: Vec<LogEntry>,
+    ) -> Envelope {
+        Envelope {
+            from: from.clone(),
+            to: to.clone(),
+            message: RaftMessage::AppendEntries {
+                leader_id,
+                prev_log_index,
+                term,
+                prev_log_term,
+                leader_commit,
+                entries,
+            },
         }
     }
 
@@ -701,11 +726,6 @@ mod tests {
         let node_2 = make_node_id();
         let node_3 = make_node_id();
 
-        let mut peers = Vec::new();
-        peers.push(node_1.clone());
-        peers.push(node_2.clone());
-        peers.push(node_3.clone());
-
         candidate_node.state = NodeState::Candidate {
             votes_received: Default::default(),
         };
@@ -752,7 +772,7 @@ mod tests {
 
         let mut next_index = HashMap::new();
         let mut match_index = HashMap::new();
-        for peer in peers.iter() {
+        for peer in candidate_node.peers.iter() {
             next_index.insert(peer.clone(), candidate_node.log.len());
             match_index.insert(peer.clone(), 0);
         }
@@ -768,6 +788,50 @@ mod tests {
 
     #[test]
     fn handle_append_entries_sender_term_is_behind_node_term_reject() {
+        // node has a higher term than the sender
+        let mut follower_node = Node::new();
+        follower_node.current_term = 2;
+        follower_node.log.push(LogEntry {
+            term: 2,
+            index: 1,
+            command: Delete { key: "".to_string() },
+        });
+
+        let sender_node = make_node_id();
+        let sender_term = 1;
+
+        let envelope = create_append_entries_request_envelope(
+            sender_node.clone(),
+            follower_node.node_id.clone(),
+            sender_node.clone(),
+            sender_term,
+            1,
+            1,
+            1,
+            vec![],
+        );
+
+        let result = follower_node
+            .handle_message(envelope)
+            .expect("handle_message failed");
+
+        assert_eq!(result.len(), 1);
+        let (to, msg) = &result[0];
+        assert_eq!(to, &sender_node);
+        assert!(matches!(
+            msg,
+            RaftMessage::AppendEntriesResponse {
+                term: 2,
+                success: false,
+                last_log_index: 1
+            }
+        ));
+    }
+
+    #[test]
+    fn handle_append_entries_logs_are_not_consistent_reject() {
+
+
 
     }
 }
