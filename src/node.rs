@@ -503,8 +503,8 @@ impl Node {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use uuid::Uuid;
     use crate::log_entry::Command::Delete;
+    use uuid::Uuid;
 
     fn make_node_id() -> NodeId {
         NodeId::from_uuid(Uuid::new_v4())
@@ -795,7 +795,9 @@ mod tests {
         follower_node.log.push(LogEntry {
             term: 2,
             index: 1,
-            command: Delete { key: "".to_string() },
+            command: Delete {
+                key: "".to_string(),
+            },
         });
 
         let sender_node = make_node_id();
@@ -837,7 +839,9 @@ mod tests {
         follower_node.log.push(LogEntry {
             term: 1,
             index: 0,
-            command: Delete { key: "".to_string() },
+            command: Delete {
+                key: "".to_string(),
+            },
         });
 
         let sender_node = make_node_id();
@@ -897,7 +901,9 @@ mod tests {
         let new_log = vec![LogEntry {
             term: 2,
             index: 1,
-            command: Delete { key: "".to_string() },
+            command: Delete {
+                key: "".to_string(),
+            },
         }];
 
         let envelope = create_append_entries_request_envelope(
@@ -930,5 +936,85 @@ mod tests {
         ));
 
         assert_eq!(follower_node.commit_index, 1);
+    }
+
+    #[test]
+    fn handle_append_entries_happy_path_truncate_log() {
+        let mut follower_node = Node::new();
+        follower_node.current_term = 2;
+        follower_node.commit_index = 1;
+
+        let entry_1 = LogEntry {
+            term: 1,
+            index: 0,
+            command: Command::Set {
+                key: "".to_string(),
+                value: "".to_string(),
+            },
+        };
+        follower_node.log.push(entry_1);
+
+        let entry_2 = LogEntry {
+            term: 1,
+            index: 1,
+            command: Command::Set {
+                key: "".to_string(),
+                value: "".to_string(),
+            },
+        };
+        follower_node.log.push(entry_2);
+
+        let sender_node = make_node_id();
+        let sender_term = 2;
+
+        let entry_3 = LogEntry {
+            term: 2,
+            index: 1,
+            command: Delete {
+                key: "".to_string(),
+            },
+        };
+        let new_log = vec![entry_3];
+
+        let envelope = create_append_entries_request_envelope(
+            sender_node.clone(),
+            follower_node.node_id.clone(),
+            sender_node.clone(),
+            sender_term,
+            1,
+            2,
+            1,
+            new_log,
+        );
+
+        let result = follower_node
+            .handle_message(envelope)
+            .expect("handle_message failed");
+
+        assert_eq!(result.len(), 1);
+        let (to, msg) = &result[0];
+        assert_eq!(to, &sender_node);
+
+        // The followers always adopts a higher term
+        assert!(matches!(
+            msg,
+            RaftMessage::AppendEntriesResponse {
+                term: 2,
+                success: true,
+                last_log_index: 1
+            }
+        ));
+
+        assert_eq!(follower_node.commit_index, 1);
+
+        assert_eq!(follower_node.log.len(), 2);
+
+        // entry at index 0 unchanged
+        assert_eq!(follower_node.log[0].term, 1);
+        assert_eq!(follower_node.log[0].index, 0);
+
+        // entry at index 1 was truncated and replaced — term changed from 1 to 2
+        assert_eq!(follower_node.log[1].term, 2);
+        assert_eq!(follower_node.log[1].index, 1);
     }
 }
