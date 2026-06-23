@@ -422,7 +422,7 @@ impl Node {
                 RaftMessage::AppendEntriesResponse {
                     term: *node_current_term,
                     success: false,
-                    last_log_index: log.len(),
+                    last_log_index: log.len() - 1,
                 },
             )];
         }
@@ -444,7 +444,7 @@ impl Node {
                     RaftMessage::AppendEntriesResponse {
                         term: *node_current_term,
                         success: false,
-                        last_log_index: log.len(),
+                        last_log_index: log.len() - 1,
                     },
                 )];
             }
@@ -463,6 +463,7 @@ impl Node {
         }
 
         if leader_commit > *commit_index {
+            // Select the smaller of (leader_commit, log.len - 1)
             *commit_index = leader_commit.min(log.len().saturating_sub(1));
         }
 
@@ -471,7 +472,7 @@ impl Node {
             RaftMessage::AppendEntriesResponse {
                 term: *node_current_term,
                 success: true,
-                last_log_index: log.len(),
+                last_log_index: log.len() - 1,
             },
         )]
     }
@@ -823,15 +824,111 @@ mod tests {
             RaftMessage::AppendEntriesResponse {
                 term: 2,
                 success: false,
-                last_log_index: 1
+                last_log_index: 0
             }
         ));
     }
 
     #[test]
     fn handle_append_entries_logs_are_not_consistent_reject() {
+        let mut follower_node = Node::new();
+        follower_node.current_term = 1;
 
+        follower_node.log.push(LogEntry {
+            term: 1,
+            index: 0,
+            command: Delete { key: "".to_string() },
+        });
 
+        let sender_node = make_node_id();
+        let sender_term = 2;
 
+        // The prev_log_term and prev_log_index are not consistent with
+        // follower node current values. Disregard the empty vec, not needed in this
+        // test.
+        let envelope = create_append_entries_request_envelope(
+            sender_node.clone(),
+            follower_node.node_id.clone(),
+            sender_node.clone(),
+            sender_term,
+            2,
+            2,
+            2,
+            vec![],
+        );
+
+        let result = follower_node
+            .handle_message(envelope)
+            .expect("handle_message failed");
+
+        assert_eq!(result.len(), 1);
+        let (to, msg) = &result[0];
+        assert_eq!(to, &sender_node);
+
+        // The followers always adopts a higher term
+        assert!(matches!(
+            msg,
+            RaftMessage::AppendEntriesResponse {
+                term: 2,
+                success: false,
+                last_log_index: 0
+            }
+        ));
+    }
+
+    #[test]
+    fn handle_append_entries_happy_path() {
+        let mut follower_node = Node::new();
+        follower_node.current_term = 2;
+        follower_node.commit_index = 1;
+
+        follower_node.log.push(LogEntry {
+            term: 1,
+            index: 0,
+            command: Command::Set {
+                key: "".to_string(),
+                value: "".to_string(),
+            },
+        });
+
+        let sender_node = make_node_id();
+        let sender_term = 2;
+
+        let new_log = vec![LogEntry {
+            term: 2,
+            index: 1,
+            command: Delete { key: "".to_string() },
+        }];
+
+        let envelope = create_append_entries_request_envelope(
+            sender_node.clone(),
+            follower_node.node_id.clone(),
+            sender_node.clone(),
+            sender_term,
+            1,
+            2,
+            1,
+            new_log,
+        );
+
+        let result = follower_node
+            .handle_message(envelope)
+            .expect("handle_message failed");
+
+        assert_eq!(result.len(), 1);
+        let (to, msg) = &result[0];
+        assert_eq!(to, &sender_node);
+
+        // The followers always adopts a higher term
+        assert!(matches!(
+            msg,
+            RaftMessage::AppendEntriesResponse {
+                term: 2,
+                success: true,
+                last_log_index: 1
+            }
+        ));
+
+        assert_eq!(follower_node.commit_index, 1);
     }
 }
