@@ -39,6 +39,10 @@ impl Node {
         }
     }
 
+    pub fn add_peer(&mut self, peer: NodeId) {
+        self.peers.push(peer)
+    }
+
     pub fn handle_message(
         &mut self,
         envelope: Envelope,
@@ -217,9 +221,7 @@ impl Node {
 
                 Ok(result)
             }
-            (_, _) => Err(NodeError::UnexpectedMessage {
-                message: "invalid command sent for current state".to_string(),
-            }),
+            (_, _) => Ok(vec![]),
         }
     }
 
@@ -484,7 +486,57 @@ impl Node {
         }
     }
 
-    pub fn node_id(&self) -> &NodeId {
+    pub fn start_election(&mut self) -> Vec<(NodeId, RaftMessage)> {
+        self.current_term += 1;
+        self.state = NodeState::Candidate {
+            votes_received: HashSet::new(),
+        };
+
+        let (last_log_index, last_log_term) =
+            self.log.last().map(|e| (e.index, e.term)).unwrap_or((0, 0));
+
+        self.peers
+            .iter()
+            .map(|peer| {
+                (
+                    peer.clone(),
+                    RaftMessage::RequestVote {
+                        term: self.current_term,
+                        candidate_id: self.node_id.clone(),
+                        last_log_index,
+                        last_log_term,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    pub fn send_heartbeats(&mut self) -> Vec<(NodeId, RaftMessage)> {
+        match self.state {
+            NodeState::Leader { .. } => self
+                .peers
+                .iter()
+                .map(|peer| {
+                    (
+                        peer.clone(),
+                        RaftMessage::AppendEntries {
+                            leader_id: self.node_id.clone(),
+                            prev_log_index: self.log.len(),
+                            term: self.current_term,
+                            prev_log_term: self.log.last().map(|e| e.term).unwrap_or(0),
+                            leader_commit: self.commit_index,
+                            entries: vec![],
+                        },
+                    )
+                })
+                .collect(),
+            _ => {
+                vec![]
+            }
+        }
+    }
+
+    pub fn id(&self) -> &NodeId {
         &self.node_id
     }
     pub fn current_term(&self) -> u64 {

@@ -11,7 +11,7 @@ impl NodeId {
         }
     }
 
-    pub(crate) fn from_uuid(id: Uuid) -> NodeId {
+    pub fn from_uuid(id: Uuid) -> NodeId {
         NodeId(id)
     }
 }
